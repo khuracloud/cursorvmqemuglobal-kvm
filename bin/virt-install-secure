@@ -157,8 +157,13 @@ DISK="$(augment_disk "$DISK" "$PROFILE")"
 
 # virt-install 4.x: disable=svm,disable=vmx (not feature.svm)
 CPU_FLAGS="host-passthrough,migratable=off,disable=svm,disable=vmx"
-# virt-install 4.x: dot notation for features
-FEATURES="hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.vpindex.state=on,hyperv.runtime.state=on,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.frequencies.state=on,kvm.hidden.state=on,vmport.state=off,smm.state=on"
+# virt-install 4.x: only a subset of hyperv flags support dot notation.
+# vpindex/runtime/stimer/frequencies must be injected via xpath (synic requires vpindex in QEMU).
+FEATURES="hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,kvm.hidden.state=on,vmport.state=off,smm.state=on"
+FEATURES+=",xpath1.create=./hyperv/vpindex,xpath2.set=./hyperv/vpindex/@state,xpath2.value=on"
+FEATURES+=",xpath3.create=./hyperv/runtime,xpath4.set=./hyperv/runtime/@state,xpath4.value=on"
+FEATURES+=",xpath5.create=./hyperv/stimer,xpath6.set=./hyperv/stimer/@state,xpath6.value=on"
+FEATURES+=",xpath7.create=./hyperv/frequencies,xpath8.set=./hyperv/frequencies/@state,xpath8.value=on"
 
 # shellcheck disable=SC2086
 exec virt-install \

@@ -82,7 +82,8 @@ DEFAULT_DISK_GB_WINDOWS="60"
 
 - CPU: `disable=svm,disable=vmx` (not `feature.svm`)
 - `--os-variant` always set
-- Features use dot notation: `hyperv.relaxed.state=on`
+- Features use dot notation where supported: `hyperv.relaxed.state=on`
+- Extra Hyper-V flags (`vpindex`, `runtime`, `stimer`, `frequencies`) use virt-install xpath injection (required for `synic` / QEMU 8.2)
 - `--cdrom` primary; `--cdlocation` supported as alias
 - `~/` expanded for sudo user via `SUDO_USER` home
 - Disk uses `pool=default` (or detected pool), not hardcoded `/var/lib/libvirt/images`
