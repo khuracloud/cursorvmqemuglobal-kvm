@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cursorvmqemuglobal — portable secure KVM/libvirt toolkit for Ubuntu LTS
+# cursorvmqemuglobal — portable secure KVM/libvirt toolkit for Debian & Ubuntu
 #
 # Usage:
 #   sudo ./install.sh              # host hardening + install tools
@@ -22,7 +22,7 @@ OFFER_WIZARD=1
 
 usage() {
   cat <<'EOF'
-cursorvmqemuglobal — secure KVM/libvirt toolkit for Ubuntu 22.04 / 24.04 / 26.04 LTS
+cursorvmqemuglobal — secure KVM/libvirt toolkit for Debian 11/12/13 and Ubuntu 22.04/24.04/26.04 LTS
 
 Commands:
   (default)         Install hardened host stack (requires sudo)

@@ -2,7 +2,7 @@
 
 ## 1. Prerequisites
 
-1. **Ubuntu LTS** (22.04, 24.04, or 26.04) on bare metal or a cloud instance with nested virt disabled.
+1. **Debian 11/12/13** or **Ubuntu LTS** (22.04, 24.04, or 26.04) on bare metal or a cloud instance with nested virt disabled.
 2. **BIOS**: enable AMD-V (SVM) or Intel VT-x.
 3. **Hardware check** (after first boot):
 

@@ -117,14 +117,15 @@ default_os_variant() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     source /etc/os-release
-    case "${VERSION_ID:-}" in
-      22.04) echo ubuntu22.04 ;;
-      24.04) echo ubuntu24.04 ;;
-      26.04) echo ubuntu24.04 ;;
-      *) echo ubuntu24.04 ;;
+    case "${ID:-}:${VERSION_ID:-}" in
+      ubuntu:22.04) echo ubuntu22.04 ;;
+      ubuntu:24.04|ubuntu:26.04) echo ubuntu24.04 ;;
+      debian:11) echo debian11 ;;
+      debian:12|debian:13) echo debian12 ;;
+      *) echo generic ;;
     esac
   else
-    echo ubuntu24.04
+    echo generic
   fi
 }
 
@@ -157,7 +158,7 @@ DISK="$(augment_disk "$DISK" "$PROFILE")"
 # virt-install 4.x: disable=svm,disable=vmx (not feature.svm)
 CPU_FLAGS="host-passthrough,migratable=off,disable=svm,disable=vmx"
 # virt-install 4.x: dot notation for features
-FEATURES="hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,kvm.hidden.state=on,vmport.state=off,smm.state=on"
+FEATURES="hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.vpindex.state=on,hyperv.runtime.state=on,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.frequencies.state=on,kvm.hidden.state=on,vmport.state=off,smm.state=on"
 
 # shellcheck disable=SC2086
 exec virt-install \

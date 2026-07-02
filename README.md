@@ -1,6 +1,6 @@
 # cursorvmqemuglobal
 
-Portable, high-security **QEMU/KVM** toolkit for **Ubuntu 22.04 / 24.04 / 26.04 LTS**. Works on any fresh Ubuntu machine — no hardcoded user paths.
+Portable, high-security **QEMU/KVM** toolkit for **Debian 11/12/13** and **Ubuntu 22.04 / 24.04 / 26.04 LTS**. One script, one install — works on any fresh Debian-family host with no hardcoded user paths.
 
 One repo replaces the separate `install-qemu-secure`, `virt-install-secure`, and `qemu-guest-security-audit` projects.
 
@@ -96,7 +96,7 @@ DEFAULT_DISK_GB_WINDOWS="60"
 
 ## Requirements
 
-- Ubuntu 22.04 / 24.04 / 26.04 LTS (64-bit)
+- Debian 11 / 12 / 13 or Ubuntu 22.04 / 24.04 / 26.04 LTS (64-bit)
 - CPU with AMD-V or Intel VT-x in BIOS
 - Bare metal or cloud instance with KVM (not nested inside another VM)
 - `sudo` access

@@ -140,7 +140,7 @@ detect_default_pool() {
   local pool_path=""
 
   if command -v virsh >/dev/null 2>&1; then
-    pool_path="$(virsh -c qemu:///system pool-dumpxml "${pool_name}" 2>/dev/null \
+    pool_path="$(virsh_cmd -c qemu:///system pool-dumpxml "${pool_name}" 2>/dev/null \
       | awk -F'[<>]' '/<path>/ {print $3; exit}')"
     if [[ -n "${pool_path}" ]]; then
       echo "${pool_name}|${pool_path}"
@@ -204,6 +204,96 @@ If libvirtd appears hung or VMs fail to start:
 On AMD hosts, nested KVM may require a reboot after install:
   sudo reboot
 EOF
+}
+
+load_os_release() {
+  [[ -n "${OS_RELEASE_LOADED:-}" ]] && return 0
+  # shellcheck disable=SC1091
+  [[ -r /etc/os-release ]] && source /etc/os-release
+  OS_RELEASE_LOADED=1
+}
+
+is_debian_family() {
+  load_os_release
+  [[ "${ID:-}" == "ubuntu" || "${ID:-}" == "debian" ]] \
+    || [[ "${ID_LIKE:-}" == *debian* ]]
+}
+
+distro_support_level() {
+  load_os_release
+  case "${ID:-}" in
+    ubuntu)
+      case "${VERSION_ID:-}" in
+        22.04|24.04|26.04) echo "supported" ;;
+        *) echo "untested" ;;
+      esac
+      ;;
+    debian)
+      case "${VERSION_ID:-}" in
+        11|12|13) echo "supported" ;;
+        *) echo "untested" ;;
+      esac
+      ;;
+    *)
+      is_debian_family && echo "untested" || echo "unsupported"
+      ;;
+  esac
+}
+
+require_debian_family() {
+  is_debian_family || die "Requires Debian or Ubuntu (found ID=${ID:-unknown})"
+}
+
+# virsh with timeout — avoids hanging when libvirtd is stuck in a hook deadlock
+virsh_cmd() {
+  local timeout_sec="${VIRSH_TIMEOUT:-15}"
+  timeout "${timeout_sec}" virsh "$@"
+}
+
+detect_security_driver() {
+  if [[ -d /sys/kernel/security/apparmor ]] \
+    && { systemctl is-active --quiet apparmor 2>/dev/null || [[ -d /etc/apparmor.d ]]; }; then
+    echo "apparmor"
+  elif command -v getenforce >/dev/null 2>&1 \
+    && [[ "$(getenforce 2>/dev/null)" =~ ^(Enforcing|Permissive)$ ]]; then
+    echo "selinux"
+  else
+    echo "none"
+  fi
+}
+
+recover_libvirtd_if_stuck() {
+  (( DRY_RUN )) && return 0
+  if virsh_cmd -c qemu:///system list --all >/dev/null 2>&1; then
+    return 0
+  fi
+
+  warn "libvirtd not responding — clearing stuck hooks and restarting"
+
+  # Hook scripts that call virsh deadlock inside libvirtd during VM prepare.
+  pkill -9 -f '/etc/libvirt/hooks/qemu.*prepare' 2>/dev/null || true
+  pkill -9 -f 'virsh dumpxml' 2>/dev/null || true
+  pkill -9 -f 'virsh -c qemu:///system' 2>/dev/null || true
+  sleep 1
+
+  for svc in libvirtd libvirtd.socket virtqemud virtqemud.socket; do
+    systemctl kill -s KILL "${svc}" 2>/dev/null || true
+    systemctl stop "${svc}" 2>/dev/null || true
+  done
+  systemctl reset-failed libvirtd virtqemud 2>/dev/null || true
+
+  for svc in virtlogd virtlogd.socket virtlockd virtlockd.socket \
+             virtnetworkd virtnetworkd.socket \
+             libvirtd.socket libvirtd virtqemud.socket virtqemud; do
+    systemctl start "${svc}" 2>/dev/null || true
+  done
+
+  if virsh_cmd -c qemu:///system list --all >/dev/null 2>&1; then
+    log "libvirtd recovered"
+    return 0
+  fi
+  warn "libvirtd still not responding after recovery"
+  return 1
 }
 
 is_amd_cpu() { grep -qi amd /proc/cpuinfo; }

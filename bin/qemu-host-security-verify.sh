@@ -4,6 +4,11 @@ pass=0; warn=0; crit=0
 ok()   { echo "[PASS] $*"; pass=$((pass+1)); }
 warn() { echo "[WARN] $*"; warn=$((warn+1)); }
 crit() { echo "[CRIT] $*"; crit=$((crit+1)); }
+
+virsh_cmd() {
+  timeout "${VIRSH_TIMEOUT:-15}" virsh "$@"
+}
+
 echo "=== KVM host security verification ==="
 [[ -c /dev/kvm ]] && ok "/dev/kvm present" || crit "/dev/kvm missing"
 for param in /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/parameters/nested; do
@@ -17,8 +22,19 @@ for param in /sys/module/kvm_intel/parameters/nested /sys/module/kvm_amd/paramet
 done
 grep -q 'listen_tcp = 0' /etc/libvirt/libvirtd.conf.d/99-hardening.conf 2>/dev/null \
   && ok "libvirt TCP off" || warn "libvirtd hardening missing"
-grep -q 'security_require_confined = 1' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null \
-  && ok "AppArmor required" || warn "qemu.conf AppArmor missing"
+if grep -q 'security_require_confined = 1' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null; then
+  if grep -q 'security_driver = "apparmor"' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null; then
+    ok "AppArmor confinement required"
+  elif grep -q 'security_driver = "selinux"' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null; then
+    ok "SELinux confinement required"
+  else
+    ok "VM confinement required"
+  fi
+elif grep -q 'security_driver = "none"' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null; then
+  ok "MAC disabled (seccomp-only hardening)"
+else
+  warn "qemu.conf confinement missing"
+fi
 grep -q 'seccomp_sandbox = 1' /etc/libvirt/qemu.conf.d/99-hardening.conf 2>/dev/null \
   && ok "QEMU seccomp on" || warn "qemu.conf seccomp missing"
 [[ -x /etc/libvirt/hooks/network ]] && ok "network hook installed" || warn "network hook missing"
@@ -32,6 +48,13 @@ if systemctl is-active --quiet virtqemud 2>/dev/null \
   ok "libvirt active (daemon or socket)"
 else
   warn "libvirt daemon inactive"
+fi
+if command -v virsh >/dev/null 2>&1; then
+  if virsh_cmd -c qemu:///system version >/dev/null 2>&1; then
+    ok "virsh responds (qemu:///system)"
+  else
+    warn "virsh timed out or failed — libvirtd may be stuck in a hook deadlock"
+  fi
 fi
 echo "PASS=$pass WARN=$warn CRIT=$crit"
 (( crit == 0 )) || exit 2

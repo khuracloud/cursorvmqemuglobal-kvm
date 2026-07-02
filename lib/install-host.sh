@@ -86,7 +86,7 @@ EOF
 
   nested_still_on || { log_nested_state; return 0; }
 
-  mapfile -t running < <(virsh -c qemu:///system list --name 2>/dev/null | sed '/^$/d' || true)
+  mapfile -t running < <(virsh_cmd -c qemu:///system list --name 2>/dev/null | sed '/^$/d' || true)
   if ((${#running[@]})); then
     warn "Running VMs (${running[*]}) — nested stays active until shutdown or reboot"
     NEEDS_REBOOT_FOR_NESTED=1
@@ -114,11 +114,11 @@ purge_existing_stack() {
   log "Mode --purge-first: removing existing QEMU/libvirt stack"
 
   if command -v virsh >/dev/null 2>&1; then
-    mapfile -t running < <(virsh -c qemu:///system list --name 2>/dev/null | sed '/^$/d' || true)
+    mapfile -t running < <(virsh_cmd -c qemu:///system list --name 2>/dev/null | sed '/^$/d' || true)
     for vm in "${running[@]:-}"; do
       [[ -n "${vm}" ]] || continue
       warn "Shutting down VM: ${vm}"
-      virsh -c qemu:///system destroy "${vm}" >/dev/null 2>&1 || true
+      virsh_cmd -c qemu:///system destroy "${vm}" >/dev/null 2>&1 || true
     done
   fi
 
@@ -168,6 +168,7 @@ install_system_config() {
 
 install_host_configs() {
   local qemu_machine="$1"
+  local security_driver="$2"
   local pool_path
   pool_path="$(get_default_pool_path)"
 
@@ -219,8 +220,10 @@ keepalive_interval = 5
 keepalive_count = 5
 EOF
 
-  log "QEMU emulator hardening"
-  write_file /etc/libvirt/qemu.conf.d/99-hardening.conf <<'EOF'
+  log "QEMU emulator hardening (security_driver=${security_driver})"
+  case "${security_driver}" in
+    apparmor)
+      write_file /etc/libvirt/qemu.conf.d/99-hardening.conf <<'EOF'
 security_driver = "apparmor"
 security_default_confined = 1
 security_require_confined = 1
@@ -238,6 +241,46 @@ max_processes = 512
 max_files = 8192
 migrate_tls_x509_cert_dir = "/etc/pki/libvirt/private"
 EOF
+      ;;
+    selinux)
+      write_file /etc/libvirt/qemu.conf.d/99-hardening.conf <<'EOF'
+security_driver = "selinux"
+security_default_confined = 1
+security_require_confined = 1
+clear_emulator_capabilities = 1
+user = "root"
+group = "root"
+dynamic_ownership = 1
+remember_owner = 1
+spice_listen = "127.0.0.1"
+vnc_listen = "127.0.0.1"
+vnc_auto_unix_socket = 1
+stdio_handler = "logd"
+seccomp_sandbox = 1
+max_processes = 512
+max_files = 8192
+migrate_tls_x509_cert_dir = "/etc/pki/libvirt/private"
+EOF
+      ;;
+    *)
+      write_file /etc/libvirt/qemu.conf.d/99-hardening.conf <<'EOF'
+security_driver = "none"
+clear_emulator_capabilities = 1
+user = "root"
+group = "root"
+dynamic_ownership = 1
+remember_owner = 1
+spice_listen = "127.0.0.1"
+vnc_listen = "127.0.0.1"
+vnc_auto_unix_socket = 1
+stdio_handler = "logd"
+seccomp_sandbox = 1
+max_processes = 512
+max_files = 8192
+migrate_tls_x509_cert_dir = "/etc/pki/libvirt/private"
+EOF
+      ;;
+  esac
 
   log "Network hook: guest isolation from host bridge"
   write_file "${LIBVIRT_NETWORK_HOOK}" <<'HOOK'
@@ -289,6 +332,7 @@ HOOK
   write_file "${LIBVIRT_QEMU_HOOK}" <<'QEMUHOOK'
 #!/usr/bin/env bash
 # Reject VM configs that weaken isolation (hostdev, host filesystem shares, open graphics)
+# NOTE: never call virsh here — libvirtd holds the lock during prepare and will deadlock.
 set -euo pipefail
 GUEST="${1:-}"
 OP="${2:-}"
@@ -297,7 +341,14 @@ SUB="${3:-}"
 [[ "${OP}" == "prepare" && "${SUB}" == "begin" ]] || exit 0
 [[ -n "${GUEST}" ]] || exit 0
 
-xml="$(virsh dumpxml "${GUEST}" 2>/dev/null || true)"
+xml=""
+for candidate in \
+  "/etc/libvirt/qemu/${GUEST}.xml" \
+  /var/lib/libvirt/qemu/domain-*-"${GUEST}"/"${GUEST}.xml"; do
+  [[ -f "${candidate}" ]] || continue
+  xml="$(cat "${candidate}")"
+  break
+done
 [[ -n "${xml}" ]] || exit 0
 
 if grep -qE '<hostdev |<filesystem |<redirdev |<redirfilter' <<<"${xml}"; then
@@ -417,15 +468,15 @@ run_host_install() {
   (( DRY_RUN )) && [[ -z "${USER_NAME}" ]] && USER_NAME="${USER:-root}"
   [[ -n "${USER_NAME}" ]] || die "Could not detect real user"
 
-  log "Checking Ubuntu"
-  # shellcheck disable=SC1091
-  source /etc/os-release || die "Missing /etc/os-release"
-  [[ "${ID:-}" == "ubuntu" ]] || warn "Tested on Ubuntu; other distros may differ."
-  echo "System: ${PRETTY_NAME:-unknown} (VERSION_ID=${VERSION_ID:-?})"
+  log "Checking distro (Debian / Ubuntu)"
+  require_debian_family
+  load_os_release
+  echo "System: ${PRETTY_NAME:-unknown} (ID=${ID:-?} VERSION_ID=${VERSION_ID:-?})"
 
-  case "${VERSION_ID:-}" in
-    22.04|24.04|26.04) echo "Compatibility: supported LTS" ;;
-    *) warn "VERSION_ID=${VERSION_ID:-?} not officially tested (22.04/24.04/26.04)" ;;
+  case "$(distro_support_level)" in
+    supported) echo "Compatibility: supported" ;;
+    untested) warn "VERSION_ID=${VERSION_ID:-?} not officially tested" ;;
+    unsupported) die "Unsupported distro: ${PRETTY_NAME:-unknown}" ;;
   esac
 
   if is_live_session; then
@@ -436,10 +487,11 @@ run_host_install() {
   BASE_PKGS=(
     qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients
     virt-manager virtinst bridge-utils cpu-checker dnsmasq-base
-    ovmf swtpm apparmor apparmor-utils iptables libguestfs-tools numactl
+    ovmf swtpm iptables libguestfs-tools numactl
   )
+  HARDENING_PKGS=(apparmor apparmor-utils)
   HWE_PKGS=()
-  [[ "${VERSION_ID:-}" == "26.04" ]] && HWE_PKGS=(ubuntu-helper-virt-hwe)
+  [[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "26.04" ]] && HWE_PKGS=(ubuntu-helper-virt-hwe)
 
   purge_existing_stack
 
@@ -448,10 +500,11 @@ run_host_install() {
 
   log "Installing packages"
   if (( DRY_RUN )); then
-    echo "  [dry-run] apt-get install -s -y ${BASE_PKGS[*]} ${HWE_PKGS[*]:-}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -s -y "${BASE_PKGS[@]}" ${HWE_PKGS[@]+"${HWE_PKGS[@]}"} 2>&1 | tail -8 || true
+    echo "  [dry-run] apt-get install -s -y ${BASE_PKGS[*]} ${HARDENING_PKGS[*]} ${HWE_PKGS[*]:-}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -s -y \
+      "${BASE_PKGS[@]}" "${HARDENING_PKGS[@]}" ${HWE_PKGS[@]+"${HWE_PKGS[@]}"} 2>&1 | tail -8 || true
   else
-    apt-get install -y "${BASE_PKGS[@]}" ${HWE_PKGS[@]+"${HWE_PKGS[@]}"}
+    apt-get install -y "${BASE_PKGS[@]}" "${HARDENING_PKGS[@]}" ${HWE_PKGS[@]+"${HWE_PKGS[@]}"}
   fi
 
   if (( ! DRY_RUN )); then
@@ -461,7 +514,8 @@ run_host_install() {
   fi
 
   QEMU_MACHINE="$(detect_qemu_machine)"
-  install_host_configs "${QEMU_MACHINE}"
+  SECURITY_DRIVER="$(detect_security_driver)"
+  install_host_configs "${QEMU_MACHINE}" "${SECURITY_DRIVER}"
   install_bin_scripts
   install_system_config
   disable_nested_kvm
@@ -474,10 +528,11 @@ run_host_install() {
     start_libvirt_stack
 
     log "Default network + isolation"
+    recover_libvirtd_if_stuck || true
     if command -v virsh >/dev/null 2>&1; then
-      virsh net-define /usr/share/libvirt/networks/default.xml >/dev/null 2>&1 || true
-      virsh net-start default >/dev/null 2>&1 || true
-      virsh net-autostart default >/dev/null 2>&1 || true
+      virsh_cmd net-define /usr/share/libvirt/networks/default.xml >/dev/null 2>&1 || true
+      virsh_cmd net-start default >/dev/null 2>&1 || true
+      virsh_cmd net-autostart default >/dev/null 2>&1 || true
       [[ -x "${LIBVIRT_NETWORK_HOOK}" ]] && "${LIBVIRT_NETWORK_HOOK}" default started begin - || true
     fi
 
@@ -487,7 +542,8 @@ run_host_install() {
 
   log "Final checks"
   if (( ! DRY_RUN )); then
-    virsh -c qemu:///system list --all 2>/dev/null || true
+    recover_libvirtd_if_stuck || true
+    virsh_cmd -c qemu:///system list --all 2>/dev/null || warn "virsh list timed out — see recovery hint below"
     if /usr/local/bin/qemu-host-security-verify.sh; then
       VERIFY_OK=1
     else
@@ -516,7 +572,7 @@ run_host_install() {
 
 [OK] Secure host installation complete.
 
-System: ${PRETTY_NAME:-Ubuntu} ${VERSION_ID:-}
+System: ${PRETTY_NAME:-Linux} ${VERSION_ID:-}
 Reboot: ${REBOOT_MSG}
 
 Verify host:
