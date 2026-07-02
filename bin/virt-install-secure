@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# High-security virt-install wrapper (Ubuntu / Windows).
+set -euo pipefail
+
+PROFILE="linux"
+PROFILE_EXPLICIT=0
+OS_VARIANT=""
+NAME=""
+MEMORY=""
+VCPUS=""
+DISK=""
+CDROM=""
+EXTRA=()
+
+usage() {
+  cat <<'EOF'
+virt-install-secure — create hardened KVM guests
+
+Required:
+  --name NAME
+  --memory MB
+  --vcpus N
+  --disk SPEC          e.g. pool=default,size=40,format=qcow2
+  --cdrom PATH         ISO path (~ expanded for sudo user)
+
+Optional:
+  --profile linux|windows   (auto-detected from ISO name if omitted)
+  --os-variant NAME         e.g. ubuntu24.04, win10
+  --cdlocation PATH         alias of --cdrom
+  --dry-run                 pass through to virt-install
+
+Examples:
+  sudo virt-install-secure --name my-vm --memory 8192 --vcpus 4 \
+    --disk pool=default,size=40,format=qcow2 \
+    --cdrom ~/Downloads/ubuntu-24.04.4-desktop-amd64.iso
+
+  sudo virt-install-secure-windows --name win10 --memory 8192 --vcpus 4 \
+    --disk pool=default,size=60,format=qcow2 \
+    --cdrom ~/Downloads/Win10_22H2_English_x64v1.iso
+EOF
+}
+
+caller_home() {
+  local u="${SUDO_USER:-${USER:-}}"
+  if [[ -n "$u" && "$u" != "root" ]]; then
+    getent passwd "$u" | cut -d: -f6
+  else
+    echo "${HOME}"
+  fi
+}
+
+resolve_path() {
+  local p="$1" home
+  home="$(caller_home)"
+  if [[ "$p" == "~" ]]; then
+    p="$home"
+  elif [[ "$p" == "~/"* ]]; then
+    p="${home}/${p:2}"
+  fi
+  if [[ ! -e "$p" ]]; then
+    echo "ERROR: file not found: $1 (resolved: $p)" >&2
+    exit 1
+  fi
+  realpath "$p"
+}
+
+detect_default_pool_name() {
+  local pool_name="default"
+  if command -v virsh >/dev/null 2>&1; then
+    if virsh -c qemu:///system pool-info "${pool_name}" >/dev/null 2>&1; then
+      echo "${pool_name}"
+      return 0
+    fi
+    pool_name="$(virsh -c qemu:///system pool-list --name 2>/dev/null | head -1 || true)"
+    [[ -n "${pool_name}" ]] && echo "${pool_name}" || echo "default"
+  else
+    echo "default"
+  fi
+}
+
+augment_disk() {
+  local spec="$1" profile="$2"
+  local bus="virtio"
+  [[ "$profile" == "windows" ]] && bus="sata"
+
+  # Use detected default pool when no pool= or path= given
+  if [[ "$spec" != *pool=* && "$spec" != *path=* ]]; then
+    local pool
+    pool="$(detect_default_pool_name)"
+    spec="pool=${pool},${spec}"
+  fi
+
+  [[ "$spec" == *bus=* ]] || spec="${spec},bus=${bus}"
+  [[ "$spec" == *cache=* ]] || spec="${spec},cache=none"
+  [[ "$spec" == *io=* ]] || spec="${spec},io=native"
+  [[ "$spec" == *discard=* ]] || spec="${spec},discard=unmap"
+  echo "$spec"
+}
+
+detect_profile_from_iso() {
+  local base="${1##*/}"
+  shopt -s nocasematch
+  if [[ "$base" =~ win|windows|win10|win11 ]]; then
+    echo windows
+  else
+    echo linux
+  fi
+  shopt -u nocasematch
+}
+
+default_os_variant() {
+  local profile="$1"
+  if [[ "$profile" == "windows" ]]; then
+    echo win10
+    return
+  fi
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    case "${VERSION_ID:-}" in
+      22.04) echo ubuntu22.04 ;;
+      24.04) echo ubuntu24.04 ;;
+      26.04) echo ubuntu24.04 ;;
+      *) echo ubuntu24.04 ;;
+    esac
+  else
+    echo ubuntu24.04
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name) NAME="$2"; shift 2 ;;
+    --memory) MEMORY="$2"; shift 2 ;;
+    --vcpus) VCPUS="$2"; shift 2 ;;
+    --disk) DISK="$2"; shift 2 ;;
+    --cdrom|--cdlocation) CDROM="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; PROFILE_EXPLICIT=1; shift 2 ;;
+    --os-variant) OS_VARIANT="$2"; shift 2 ;;
+    --dry-run) EXTRA+=(--dry-run); shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) EXTRA+=("$1"); shift ;;
+  esac
+done
+
+[[ -n "$NAME" && -n "$MEMORY" && -n "$VCPUS" && -n "$DISK" && -n "$CDROM" ]] || {
+  usage
+  echo "ERROR: missing required arguments" >&2
+  exit 1
+}
+
+CDROM="$(resolve_path "$CDROM")"
+(( ! PROFILE_EXPLICIT )) && PROFILE="$(detect_profile_from_iso "$CDROM")"
+DISK="$(augment_disk "$DISK" "$PROFILE")"
+[[ -z "$OS_VARIANT" ]] && OS_VARIANT="$(default_os_variant "$PROFILE")"
+
+# virt-install 4.x: disable=svm,disable=vmx (not feature.svm)
+CPU_FLAGS="host-passthrough,migratable=off,disable=svm,disable=vmx"
+# virt-install 4.x: dot notation for features
+FEATURES="hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,kvm.hidden.state=on,vmport.state=off,smm.state=on"
+
+# shellcheck disable=SC2086
+exec virt-install \
+  --connect qemu:///system \
+  --name "${NAME}" \
+  --memory "${MEMORY}" \
+  --vcpus "${VCPUS}" \
+  --disk "${DISK}" \
+  --cdrom "${CDROM}" \
+  --os-variant "${OS_VARIANT}" \
+  --virt-type kvm \
+  --machine q35 \
+  --arch x86_64 \
+  --cpu "${CPU_FLAGS}" \
+  --clock hypervclock_present=yes \
+  --features "${FEATURES}" \
+  --network network=default,model=virtio,filterref=clean-traffic \
+  --graphics spice,listen=127.0.0.1 \
+  --video virtio \
+  --channel spicevmc \
+  --memballoon virtio \
+  --rng /dev/urandom \
+  --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
+  --watchdog model=itco,action=reset \
+  --panic model=hyperv \
+  --boot uefi \
+  --events on_reboot=restart,on_crash=destroy,on_poweroff=destroy \
+  --noautoconsole \
+  ${EXTRA[@]+"${EXTRA[@]}"}

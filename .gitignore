@@ -1,0 +1,6 @@
+# User config (created by wizard)
+.config/
+
+# Editor
+*.swp
+*~
